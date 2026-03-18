@@ -2,146 +2,73 @@
 
 import cv2
 import numpy as np
-from utils import mouse_handler
-from utils import get_four_points
-import sys
+import time
 
+MIN_MATCH_COUNT = 10
 
 cap = cv2.VideoCapture('2.mp4')
-MIN_MATCH_COUNT = 10
-#img1 = cv2.imread('b.png', cv2.IMREAD_UNCHANGED)
-img1 = cv2.imread('a.png', 0) # Query picture
-img2 = cv2.imread('d.png', 0) # training picture
-sift = cv2.xfeatures2d.SIFT_create()
 
-# Use SIFT to find key points and descriptors
+img1 = cv2.imread('a.png', 0)
+sift = cv2.SIFT_create()
 kp1, des1 = sift.detectAndCompute(img1, None)
 
-# Read background image
-background = cv2.imread("a.png")
-dimensions = background.shape
-height = background.shape[0]
-width = background.shape[1]
+FLANN_INDEX_KDTREE = 1
+flann = cv2.FlannBasedMatcher(
+    dict(algorithm=FLANN_INDEX_KDTREE, trees=5),
+    dict(checks=50),
+)
 
-#foreGroundImage = cv2.imread("ban.png", -1)
+background = cv2.imread("a.png")
+height, width = background.shape[:2]
+
 fore = cv2.imread("oh.png", -1)
 foreGroundImage = cv2.resize(fore, (width, height))
 
-
-# Split png foreground image
 b, g, r, a = cv2.split(foreGroundImage)
+foreground = cv2.merge((b, g, r)).astype(float)
+alpha = cv2.merge((a, a, a)).astype(float) / 255
 
-# Save the foregroung RGB content into a single object
-foreground = cv2.merge((b, g, r))
+replacement_img = cv2.add(
+    cv2.multiply(alpha, foreground),
+    cv2.multiply(1.0 - alpha, background.astype(float)),
+).astype(np.uint8)
 
-# Save the alpha information into a single Mat
-alpha = cv2.merge((a, a, a))
+h_ref, w_ref = img1.shape
+corners_ref = np.float32([[0, 0], [0, h_ref - 1], [w_ref - 1, h_ref - 1], [w_ref - 1, 0]]).reshape(-1, 1, 2)
 
+prev_time = time.time()
 
-# Convert uint8 to float
-foreground = foreground.astype(float)
-background = background.astype(float)
-alpha = alpha.astype(float) / 255
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-# Perform alpha blending
-foreground = cv2.multiply(alpha, foreground)
-background = cv2.multiply(1.0 - alpha, background)
-outImage = cv2.add(foreground, background)
+    kp2, des2 = sift.detectAndCompute(frame, None)
 
-cv2.imwrite("f.png", outImage)
+    if des1 is not None and des2 is not None and len(des1) > 2 and len(des2) > 2:
+        matches = flann.knnMatch(des1, des2, k=2)
+        good = [m for m, n in matches if m.distance < 0.7 * n.distance]
 
-# Loop until the end of the video
-while (cap.isOpened()):
-	ret, frame = cap.read()
-	# Display image.
-	kp2, des2 = sift.detectAndCompute(frame, None)
-	FLANN_INDEX_KDTREE = 0
-	index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
-	search_params = dict(checks=50)
+        if len(good) > MIN_MATCH_COUNT:
+            src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+            dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
 
-	flann = cv2.FlannBasedMatcher(index_params, search_params)
-	if (des1 is not None and len(des1) > 2 and des2 is not None and len(des2) > 2):
-		matches = flann.knnMatch(des1, des2, k=2)
-	#matches = flann.knnMatch(des1, des2, k=2)
+            M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
 
-		good = []
-		for m, n in matches:
-			if m.distance < 0.7 * n.distance:
-				good.append(m)
+            if M is not None:
+                dst_corners = cv2.perspectiveTransform(corners_ref, M)
+                warped = cv2.warpPerspective(replacement_img, M, (frame.shape[1], frame.shape[0]))
+                cv2.fillConvexPoly(frame, dst_corners.astype(np.int32), 0, 16)
+                frame = frame + warped
 
-		if len(good) > MIN_MATCH_COUNT:
-			src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
-			dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+    cur_time = time.time()
+    fps = 1.0 / (cur_time - prev_time) if cur_time != prev_time else 0
+    prev_time = cur_time
+    cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-			M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-			matchesMask = mask.ravel().tolist()
+    cv2.imshow("Image", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-			h, w = img1.shape
-			pts = np.float32([[0, 0], [0, h - 1], [w - 1, h - 1], [w - 1, 0]]).reshape(-1, 1, 2)
-			#print(M)
-			#print(pts)
-			if (M is not None and pts is not None):
-				dst = cv2.perspectiveTransform(pts, M)
-				print(dst)
-				pts_dst = dst
-				# cv2.imshow("outImg", outImage/255)
-				# cv2.waitKey(0)
-				im_src = cv2.imread('f.png');
-				size = im_src.shape
-
-				# Create a vector of source points.
-				pts_src = np.array(
-					[
-						[0, 0],
-						[size[1] - 1, 0],
-						[size[1] - 1, size[0] - 1],
-						[0, size[0] - 1]
-					], dtype=float
-				);
-
-				# Read destination image
-				#im_dst = cv2.imread('d.png');
-				im_dst = frame;
-				# Get four corners of the billboard
-
-				# pts_dst = dst
-
-				print(pts_dst)
-				pts_dst = pts_dst[[0, 3, 2, 1]]
-				print(pts_dst)
-				# Calculate Homography between source and destination points
-				h, status = cv2.findHomography(pts_src, pts_dst);
-
-				# Warp source image
-				im_temp = cv2.warpPerspective(im_src, h, (im_dst.shape[1], im_dst.shape[0]))
-
-				# Black out polygonal area in destination image.
-				cv2.fillConvexPoly(im_dst, pts_dst.astype(int), 0, 16);
-
-				# Add warped source image to destination image.
-				im_dst = im_dst + im_temp;
-				cv2.imshow("Image", im_dst);
-				#cv2.waitKey(0);
-			else:
-				cv2.imshow("Image", frame);
-
-		else:
-			print("Not enough matches are found", (len(good), MIN_MATCH_COUNT))
-			cv2.imshow("Image", frame);
-			matchesMask = None
-
-	# Display image.
-	#cv2.imshow("Image", im_dst);
-	#cv2.waitKey(0);
-
-
-
-
-
-
-
-	#cv2.imshow("Image", frame);
-	#cv2.waitKey(1);
-	
-	if cv2.waitKey(25) & 0xFF == ord('q'):
-		break
+cap.release()
+cv2.destroyAllWindows()
